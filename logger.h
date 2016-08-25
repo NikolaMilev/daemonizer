@@ -1,5 +1,5 @@
-#ifndef LOGGER_ESDL_
-#define LOGGER_ESDL_
+#ifndef LOGGER_A_
+#define LOGGER_A_
 
 #include <stdio.h>
 #include <time.h>
