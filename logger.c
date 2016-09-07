@@ -1,28 +1,48 @@
 #include "logger.h"
+#include <errno.h>
 
 char LOGPATH_[PATH_LEN_] = "log.txt";
 char LOGERRPATH_[PATH_LEN_] = "err.txt";
 char LOGBINPATH_[PATH_LEN_] = "logbin.txt";
+char SEPARATE_BY_NEWLINE_ = 1;
+char NEWLINE_STRING_[3] = "\n";
+size_t LAST_READ_SIZE_BIN_  = 0;
 
 FILE *logFile = NULL ;
-
-
-void free_fp_(FILE **fp)
-{
-	fclose(*fp);
-	*(fp) = NULL;
-}
 
 void logger_cleanup_()
 {
 	if(logFile != NULL)
 	{
-		free_fp_(&logFile);
+		fclose(logFile);
+		logFile = NULL;
 	}
+}
+
+FILE* open_log_(const char *path, const char *mode)
+{
+	FILE *fp;
+	//Try to open the file; repeating if the open() call was interrupted by a signal
+	while(1)
+	{
+		if((fp = fopen(path, mode)) == NULL)
+		{
+			if(errno == EINTR)
+			{
+				continue;
+			}
+		}
+		break;
+	}
+
+	return fp;
 }
 
 void print_small_(char *dest, int val)
 {
+	// This function bears no significance on the logic of the logging system
+	// itself; It is merely a tool for writing seconds, minutes or hours using
+	// exactly 2 digits
 	val = val % 100 ;
 	if(val < 10)
 	{
@@ -44,9 +64,11 @@ char* get_time_()
 	//Pointers returned by localtime are pointer sto statically allocated memory and, as such, MUST NOT be freed
 	struct tm  *timestruct;
 
+	// More on time structures is to be found on man pages or online
 	time_now = time(NULL);
 	timestruct = localtime(&time_now);
 
+	// If an error was detected, we return NULL
 	if(timestruct == NULL)
 	{
 		return NULL ;
@@ -77,7 +99,7 @@ char* get_time_()
 	return buf;
 }
 
-int log_msg_ (const char* msg, const char* logpath)
+int log_msg_(const char* msg, const char* timestamp, const char* logpath)
 {
 	char newline[3];
 	int indicator;
@@ -87,39 +109,64 @@ int log_msg_ (const char* msg, const char* logpath)
 	newline[2]='\0';
 
 	//Try to open
-	if((logFile = fopen(logpath, "a+")) == NULL)
+	if((logFile = open_log_(logpath, "a+")) == NULL)
 	{
-		return -1;
+		return OPEN_FAIL_;
 	}
 
-	//Check if there is need for new line or not and which one to insert
+	//Check if there is need for new line or not and copy it
 	if(SEPARATE_BY_NEWLINE_ == 1)
 	{
-		newline[0] = '\n';
-		if(strlen(NEWLINE_STRING_) == 2)
-		{
-			newline[1] = '\r';
-		}
+		strcpy(newline, NEWLINE_STRING_);
 	}
 
-	get_time_val = get_time_();
-	indicator = fprintf(logFile, "%s%s%s", get_time_val, msg, newline);
-	if(indicator < 0)
+	if(timestamp == NULL || timestamp[0] == '\0')
 	{
-		indicator = -1;
-	}
-	else if(indicator < strlen(msg) + strlen(newline) + TIMESTAMP_LEN_)
-	{
-		indicator = -2;
+		get_time_val = get_time_();
 	}
 	else
 	{
-		indicator = 0;
+		get_time_val = (char*)timestamp;
 	}
+	indicator = fprintf(logFile, "%s%c%s%c%s", get_time_val, MSGDELIM_START_, msg, MSGDELIM_END_, newline);
+	//This means fprintf failed
+	if(indicator < 0)
+	{
+		fclose(logFile);
+		return WRITE_FAIL_;
+	}
+	//If written less than expected, deleting all that's been written
+	//Everything is written or nothing is
+	//Not sure this is even a possible situation but want to be sure
+	else if(indicator < strlen(msg) + strlen(newline) + TIMESTAMP_LEN_)
+	{
+		unsigned long pos;
+		fseek(logFile, 0, SEEK_END);
+		pos = ftell(logFile);
+		fclose(logFile);
+		// Since the calls are blocking, we try again if interrupted by a signal
+		while(1)
+		{
+			truncate(logpath, pos - indicator);
+			if(errno == EINTR)
+			{
+				continue;
+			}
+			break;
+		}
+		return WRITE_FAIL_;
+	}
+	//Everything is fine
+	else
+	{
+		fclose(logFile);
+		return OK_;
+	}
+}
 
-	free(get_time_val);
-	free_fp_(&logFile);
-	return indicator;
+int log_msg_now_(const char* msg, const char* logpath)
+{
+	return log_msg_(msg, get_time_(), logpath);
 }
 
 int log_bin_(const char *data, const size_t length, const char* logpath)
@@ -132,15 +179,14 @@ int log_bin_(const char *data, const size_t length, const char* logpath)
 	tmstr.time_f = time(NULL);
 	szstr.size_f = length;
 
-
-	//Lower indices mean lower addresses in the number (on my current PC, needs to be checked in the openwrt)
-	//I will read and write in the same order so this should not be a problem
-	//For instance:
+	// Lower indices mean lower addresses in the number (on my current PC, needs to be checked in the openwrt)
+	// I will read and write in the same order so this should not be a problem
+	// For instance:
 	//	TIME: 1471512034	 LENGTH: 3
 	//	Printed bytes:
 	//	226 125 181 87 0 0 0 0 3 0 0 0 0 0 0 0
 
-	//Filling the header
+	// Filling the header
 	for(i = 0; i<sizeof(time_t); i++)
 	{
 		header[i] = tmstr.char_f[i];
@@ -150,26 +196,73 @@ int log_bin_(const char *data, const size_t length, const char* logpath)
 		header[i + sizeof(time_t)] = szstr.char_f[i];
 	}
 
-	//a+b means that everything I write is appended to the end and that the file is read in binary mode (byte by byte)
-	if((logFile = fopen(logpath, "a+b")) == NULL)
+	//	Opening the file we are logging to
+	// a+b means that everything I write is appended to the end and that the file is interpreted in binary mode (byte by byte)
+	if((logFile = open_log_(logpath, "a+b")) == NULL)
 	{
-		return -1;
+		return OPEN_FAIL_;
 	}
 
 	header_bytesout_ = fwrite(header, sizeof(char), HEADER_LEN_, logFile);
-	data_bytesout_ = fwrite(data, sizeof(char), length, logFile);
 
-	free_fp_(&logFile);
-	if(header_bytesout_ <= 0 || data_bytesout_ < 0)
+	// fwrite returns number of items written (with sizeof(char), number of characters)
+	// if the number is zero or less than HEADER_LEN_, we can assume that the writing is unsuccessful
+	if(header_bytesout_ == 0)
 	{
-		//maybe a cleanup: remember the position of the file before the operations and return there
-		return -1;
+		fclose(logFile);
+		return WRITE_FAIL_;
+	}
+	else if(header_bytesout_ < HEADER_LEN_)
+	{
+		unsigned long pos;
+		fseek(logFile, 0, SEEK_END);
+		pos = ftell(logFile);
+		fclose(logFile);
+		// Since the calls are blocking, we try again if interrupted by a signal
+		while(1)
+		{
+			truncate(logpath, pos - header_bytesout_);
+			if(errno == EINTR)
+			{
+				continue;
+			}
+			break;
+		}
+		return WRITE_FAIL_;
 	}
 
+	data_bytesout_ = fwrite(data, sizeof(char), length, logFile);
+	//The same thing as above but we also delete the header from the file
+	//because it's a part of the same logged piece of information
+	if(data_bytesout_ == 0)
+	{
+		fclose(logFile);
+		return WRITE_FAIL_;
+	}
+	else if(data_bytesout_ < length)
+	{
+		unsigned long pos;
+		fseek(logFile, 0, SEEK_END);
+		pos = ftell(logFile);
+		fclose(logFile);
+		// Since the calls are blocking, we try again if interrupted by a signal
+		while(1)
+		{
+			truncate(logpath, pos - header_bytesout_ - data_bytesout_);
+			if(errno == EINTR)
+			{
+				continue;
+			}
+			break;
+		}
+		return WRITE_FAIL_;
+	}
+
+	fclose(logFile);
 	return header_bytesout_ + data_bytesout_ ;
 }
 
-char* unlog_bin_full_data_(const char* logpath, int *err)
+char* read_bin_full_data_(const char* logpath, int *err)
 {
 	char *ret_buffer ;
 	char tmp;
@@ -177,44 +270,44 @@ char* unlog_bin_full_data_(const char* logpath, int *err)
 	size_str_ szstr;
 	int ctr;
 
-	*err = 0;
+	// Assigning the variables default values
+	*err = OK_;
 	tmstr.time_f = 0;
 	szstr.size_f = 0;
 
 	//Opening the file in append/write mode, as a binary file
-	if((logFile = fopen(logpath, "a+b")) == NULL)
+	if((logFile = open_log_(logpath, "a+b")) == NULL)
 	{
-		*err = -2;
+		*err = OPEN_FAIL_;
 		return NULL;
 	}
 
-	//Checking if the file is empty; SEEK_END is the position of the end of the file and SEEK_SET is the position of the start of the file
-	if(fseek(logFile, 0, SEEK_END) - fseek(logFile, 0, SEEK_SET))
+	// Checking if the file is empty; SEEK_END is the position of the end of the file and thus also the size of file in bytes
+	fseek(logFile, 0, SEEK_END);
+	if(ftell(logFile) == 0)
 	{
-		//This means the file is empty
-		free_fp_(&logFile);
+		//This means the file is empty; there is nothing to be read
+		fclose(logFile);
 		return NULL;
 	}
+	//Returning to the beginning of the file
+	fseek(logFile, 0, SEEK_SET);
 
 	//The main loop of the function
 	while(1)
 	{
-		//If we can't read a byte, it means we reached the end of the file or an error occurred
+		// If we can't read a byte, it means we reached the end of the file or an error occurred
 		if(fread(&tmp, sizeof(char), 1, logFile) != 1)
 		{
-			//feof(logFile) will return a non-zero value if we attempted to read after reaching the end of the file
+			// feof(logFile) will return a non-zero value if we attempted to read after reaching the end of the file
 			if(feof(logFile))
 			{
-
-
-				long pos;
-
-				//Allocating the return buffer
+				// Allocating the return buffer
 				ret_buffer = malloc(HEADER_LEN_ + szstr.size_f);
 				if(ret_buffer == NULL)
 				{
-					*err = -1;
-					free_fp_(&logFile);
+					*err = MALLOC_FAIL_;
+					fclose(logFile);
 					return NULL;
 				}
 
@@ -228,31 +321,29 @@ char* unlog_bin_full_data_(const char* logpath, int *err)
 				//Reading the data into the rest of the return buffer
 				if(fread((ret_buffer + HEADER_LEN_), sizeof(unsigned char), szstr.size_f * sizeof(unsigned char), logFile) != szstr.size_f)
 				{
-					*err = -3;
-					free_fp_(&logFile);
+					*err = READ_FAIL_;
+					fclose(logFile);
 					return NULL;
 				}
 
-				//Again moving backwards, so that we can truncate the file
-				fseek(logFile, -(szstr.size_f+ HEADER_LEN_), SEEK_END);
-				pos = ftell(logFile);
-				truncate(logpath, pos);
+				// Breaking out of the loop so we can return successfully;
+				// Remembering the last read size
+				LAST_READ_SIZE_BIN_ = szstr.size_f ;
 				break;
 			}
+			//An error occurred, do a cleanup and return error
 			else
 			{
-				//An error occurred, do a cleanup and return error
-				free_fp_(&logFile);
-				*err = -3;
+				fclose(logFile);
+				*err = READ_FAIL_;
 				return NULL;
 			}
 		}
+		// We have read one byte successfully. That was just a test so we have to move one byte back
 		else
 		{
-			//Going one back
+			//Going one byte back
 			fseek(logFile, -sizeof(unsigned char), SEEK_CUR);
-			// printf("FSEEK %d\n", );
-			// printf("ERRNO %d\n", errno);
 
 			//Reading the time part of the header into the structure tmstr
 			for(ctr = 0; ctr < sizeof(time_t); ctr++)
@@ -260,8 +351,8 @@ char* unlog_bin_full_data_(const char* logpath, int *err)
 				if(fread(&tmp, sizeof(unsigned char), 1, logFile) != 1)
 				{
 					//An error or bad file structure
-					free_fp_(&logFile);
-					*err = -3;
+					fclose(logFile);
+					*err = READ_FAIL_;
 					return NULL;
 				}
 				tmstr.char_f[ctr] = tmp;
@@ -274,21 +365,23 @@ char* unlog_bin_full_data_(const char* logpath, int *err)
 				{
 					//The same error as above
 					//I assume it's my structure which is good for this kind of read
-					free_fp_(&logFile);
-					*err = -3;
+					fclose(logFile);
+					*err = READ_FAIL_;
 					return NULL;
 				}
 				szstr.char_f[ctr] = tmp;
 			}
-			//Moving forward, skipping the data
+			// Moving forward, skipping the data;
+			// We have saved the last read size and time of logging into the structures
+			// and when we reach the end of file, we will know how many bytes to return
 			fseek(logFile, szstr.size_f, SEEK_CUR);
 		}
 	}
-	free_fp_(&logFile);
+	fclose(logFile);
 	return ret_buffer;
 }
 
-char* unlog_bin_parsed_(const char* logpath, int *err, time_t *t, size_t *s)
+char* read_bin_parsed_(const char* logpath, int *err, time_t *t, size_t *s)
 {
 	char* data ;
 	int i;
@@ -296,19 +389,23 @@ char* unlog_bin_parsed_(const char* logpath, int *err, time_t *t, size_t *s)
 	time_str_ tmstr;
 	size_str_ szstr;
 
+	// Checking if the path is NULL or not
+
 	if(logpath == NULL)
 	{
-		*err = -4;
+		*err = BAD_LOG_PATH_;
 		return NULL;
 	}
 
-	data = unlog_bin_full_data_(logpath, err);
+	data = read_bin_full_data_(logpath, err);
 
+	// The potential error is recorded in err variable so it's safe to just return NULL
 	if(data == NULL)
 	{
 		return NULL;
 	}
 
+	// Copying the header into the structures
 	for(i=0; i < sizeof(time_t); i++)
 	{
 		tmstr.char_f[i] = data[i];
@@ -318,19 +415,74 @@ char* unlog_bin_parsed_(const char* logpath, int *err, time_t *t, size_t *s)
 		szstr.char_f[i] = data[i + sizeof(time_t)];
 	}
 
+	// Copying the values from the structures into the time_t and size_t variables, respectively
 	*t = tmstr.time_f;
 	*s = szstr.size_f;
 
 	ret_buffer = malloc(*s);
-
 	if(ret_buffer == NULL)
 	{
-		*err = -1;
+		*err = MALLOC_FAIL_;
 		return NULL;
 	}
-
+	//	Filling the return buffer and returning the data acquired
 	strncpy(ret_buffer, data + HEADER_LEN_, *s);
 
 	free(data);
 	return ret_buffer;
+}
+
+int truncate_by_(const char *path, unsigned amount)
+{
+	unsigned long pos;
+	FILE* f;
+
+	//Opening the file for read so that we can find the position of the end of the file
+	if((f = open_log_(path, "rb")) == NULL)
+	{
+		return OPEN_FAIL_;
+	}
+
+	// Obtaining the end position of the file. The end position is the length
+	// of the file, in bytes
+	fseek(f, 0, SEEK_END);
+	pos = ftell(f);
+
+	// We no longer need the open file
+	fclose(f);
+
+	// Repeating while interrupted by a signal
+	while(1)
+	{
+		if(truncate(path, pos - amount) < 0)
+		{
+			if(errno == EINTR)
+			{
+				continue;
+			}
+			else
+			{
+				return WRITE_FAIL_;
+			}
+		}
+		else
+		{
+			return OK_;
+		}
+	}
+}
+
+int truncate_last_bin_(const char *path)
+{
+	int indicator;
+	indicator = truncate_by_(path, LAST_READ_SIZE_BIN_);
+	// If everything went okay with truncate_by_() call, we reset LAST_READ_SIZE_BIN_  and return OK_
+	if(indicator == OK_)
+	{
+		LAST_READ_SIZE_BIN_ = 0;
+		return OK_;
+	}
+
+	// Otherwise, failure
+	return indicator;
 }

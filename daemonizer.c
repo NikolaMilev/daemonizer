@@ -14,11 +14,11 @@ static void signal_handler(int signo)
 		int retval = do_cleanup_();
 		if(retval > 0)
 		{
-			LOG_MSG_("Closing the server with successful cleanup!");
+			LOG_MSG_NOW_("Closing the server with successful cleanup!");
 		}
 		else
 		{
-			LOG_MSG_("Closing the server with unsuccessful cleanup!");
+			LOG_MSG_NOW_("Closing the server with unsuccessful cleanup!");
 		}
 	}
 	exit(EXIT_SUCCESS);
@@ -40,12 +40,12 @@ int daemonize(void)
 		//ENOSYS means that fork is not supported on this platform
 		if(errno == ENOSYS)
 		{
-			LOG_ERROR_("Forking not supported on this platform.");
+			LOG_ERROR_NOW_("Forking not supported on this platform.");
 			return DAEM_FAIL_;
 		}
 		else
 		{
-			LOG_ERROR_("Insufficient resources for forking.");
+			LOG_ERROR_NOW_("Insufficient resources for forking.");
 			return DAEM_FAIL_;
 		}
 	}
@@ -65,7 +65,7 @@ int daemonize(void)
 	//Getting the resource information
 	if(getrlimit(RLIMIT_NOFILE, &res_limit) < 0)
 	{
-		LOG_ERROR_("Cannot close all the files! (reading the resources)");
+		LOG_ERROR_NOW_("Cannot close all the files! (reading the resources)");
 		return DAEM_FAIL_;
 	}
 
@@ -90,7 +90,7 @@ int daemonize(void)
 	//Checking for errors in the operations above
 	if(fd0 != 0 || fd1 != 1 || fd2 != 2)
 	{
-		LOG_ERROR_("Cannot replace 0, 1 and 2 file descriptors!");
+		LOG_ERROR_NOW_("Cannot replace 0, 1 and 2 file descriptors!");
 		return DAEM_FAIL_;
 	}
 
@@ -101,7 +101,7 @@ int daemonize(void)
 	signal_action.sa_flags = 0;
 	if (sigaction(SIGHUP, &signal_action, NULL) < 0)
 	{
-		LOG_ERROR_("Can't ignore SIGHUP");
+		LOG_ERROR_NOW_("Can't ignore SIGHUP");
 		return DAEM_FAIL_;
 	}
 
@@ -111,7 +111,7 @@ int daemonize(void)
 	pid = fork();
 	if(pid < 0)
 	{
-		LOG_ERROR_("Second fork failed!");
+		LOG_ERROR_NOW_("Second fork failed!");
 		return DAEM_FAIL_;
 	}
 	else if(pid > 0)
@@ -124,20 +124,20 @@ int daemonize(void)
 	if(signal(SIGTERM, signal_handler) == SIG_ERR)
 	{
 		//This should actually never happen
-		LOG_ERROR_("Bad signal number!");
+		LOG_ERROR_NOW_("Bad signal number!");
 		return DAEM_FAIL_;
 	}
 
 	//Changing the dir to a safe place (for logging, loading files, etc)
 	if(chdir(WORKDIR_) < 0)
 	{
-		LOG_ERROR_("Cannot change directory!");
+		LOG_ERROR_NOW_("Cannot change directory!");
 		return DAEM_FAIL_;
 	}
 
 	if(is_running_file_() != RUN_NOT_RUNNING_)
 	{
-		LOG_ERROR_("Another process instace already running!");
+		LOG_ERROR_NOW_("Another process instace already running!");
 		exit(EXIT_FAILURE);
 	}
 
@@ -152,39 +152,11 @@ int main(void)
 	while(1)
 	{
 		sleep(5);
-		LOG_MSG_("Hello, bitches!");
+		LOG_MSG_NOW_("Hello, bitches!");
 	}
 
 	return 0;
 
-}
-
-int is_running_socket_()
-{
-
- 	struct sockaddr_un socket_var;
-
-	if((socket_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0)
-	{
-		return RUN_FAIL_ ;
-	}
-
-	bzero(&socket_var, sizeof(socket_var));
-	socket_var.sun_family = AF_UNIX;
-	snprintf(socket_var.sun_path, MAX_SOCK_PATH_LEN_, "%s", LOCK_PATH_);
-
-	if(bind(socket_fd, (struct sockaddr*) &socket_var, sizeof(socket_var)) < 0)
-	{
-		if(errno == EADDRINUSE)
-		{
-			return RUN_RUNNING_;
-		}
-		else
-		{
-			return RUN_FAIL_;
-		}
-	}
-	return RUN_NOT_RUNNING_ ;
 }
 
 int is_running_file_()

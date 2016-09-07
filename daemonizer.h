@@ -10,7 +10,6 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
-#include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/file.h>
 
@@ -31,17 +30,15 @@
 //and only readable by the rest
 #define UMASK_ 022
 
-int socket_fd;
 int file_fd;
 
-#define WORKDIR_ "/home/reaponja/Desktop/daemon/log"
-#define LOCK_PATH_ "/home/reaponja/Desktop/daemon/socket_file"
+#define WORKDIR_ "/home/reaponja/Desktop/daemon/daemonizer"
+#define LOCK_PATH_ "/home/reaponja/Desktop/daemon/lock_file"
 #define MAX_SOCK_PATH_LEN_ 60
 
 int do_cleanup_(void) ;
 static void signal_handler(int signo) ;
 int daemonize(void) ;
-int is_running_socket_() ;
 int is_running_file_() ;
 
 pid_t lock_test(int fd) ;
